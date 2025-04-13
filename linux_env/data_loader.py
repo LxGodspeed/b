@@ -1,6 +1,10 @@
 import os
+import sys
 import pickle
 import time
+
+# 添加当前目录到sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 默认文件路径
 DEFAULT_DATA_FILE = "utxo_data.pkl"
