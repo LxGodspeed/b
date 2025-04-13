@@ -10,10 +10,16 @@ import binascii
 import struct
 from typing import List, Tuple, Dict, Set, Optional
 
-# 导入本地模块
-from linux_env.data_loader import DataLoader
-from linux_env.logger import ExperimentLogger
-from linux_env.notifier import ExperimentNotifier
+# 添加当前目录到sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# 导入本地模块，移除linux_env前缀
+from data_loader import DataLoader
+from logger import ExperimentLogger
+from notifier import ExperimentNotifier
 
 # 尝试导入CuPy
 CUDA_AVAILABLE = False
@@ -664,42 +670,93 @@ class ComputeEngine:
             return self._batch_transform_cpu(data_list)
     
     def _batch_transform_cpu(self, data_list: List[bytes]) -> Dict[str, bytes]:
-        """使用CPU批量处理数据，优化版本"""
+        """使用CPU单线程处理数据 - 稳定版"""
         start_time = time.time()
+        batch_size = len(data_list)
         result = {}
         
-        # 预先创建需要用到的哈希对象
-        h = hashlib.new('ripemd160')
+        # 打印开始处理信息
+        print(f"CPU开始处理批次: {batch_size}条数据...", flush=True)
         
-        for data in data_list:
-            try:
-                # 计算SHA256哈希
-                digest1 = hashlib.sha256(data).digest()
+        try:
+            # 直接处理，不使用多进程（更稳定）
+            chunk_size = 10000  # 较小的区块，便于进度显示
+            chunk_count = (batch_size + chunk_size - 1) // chunk_size
+            
+            print(f"数据已分割为 {chunk_count} 个小区块进行处理", flush=True)
+            
+            # 简单循环处理所有数据
+            total_processed = 0
+            for i in range(0, batch_size, chunk_size):
+                end_idx = min(i + chunk_size, batch_size)
+                current_chunk = data_list[i:end_idx]
+                chunk_size_actual = len(current_chunk)
                 
-                # 执行RIPEMD-160哈希
-                h.update(digest1)
-                digest2 = h.digest()
-                h.reset()  # 重置哈希对象以便重用
+                print(f"处理区块 {i//chunk_size + 1}/{chunk_count}...", flush=True)
+                chunk_start = time.time()
                 
-                # 添加版本前缀 (0x00)
-                versioned_hash = b'\x00' + digest2
+                # 直接处理，不使用process_chunk函数
+                local_result = {}
+                h = hashlib.new('ripemd160')
                 
-                # 计算校验和
-                checksum = hashlib.sha256(hashlib.sha256(versioned_hash).digest()).digest()[:4]
+                for data in current_chunk:
+                    try:
+                        # 计算SHA256哈希
+                        digest1 = hashlib.sha256(data).digest()
+                        
+                        # 执行RIPEMD-160哈希
+                        h.update(digest1)
+                        digest2 = h.digest()
+                        h.reset()  # 重置哈希对象以便重用
+                        
+                        # 添加版本前缀 (0x00)
+                        versioned_hash = b'\x00' + digest2
+                        
+                        # 计算校验和
+                        checksum = hashlib.sha256(hashlib.sha256(versioned_hash).digest()).digest()[:4]
+                        
+                        # 组合得到最终的标识符字节
+                        binary_identifier = versioned_hash + checksum
+                        
+                        # 使用十六进制格式而不是Base58编码
+                        hex_id = binary_identifier.hex()
+                        local_result[hex_id] = data
+                    except Exception:
+                        continue
                 
-                # 组合得到最终的标识符字节
-                binary_identifier = versioned_hash + checksum
+                # 更新总结果
+                result.update(local_result)
+                total_processed += chunk_size_actual
                 
-                # Base58编码
-                identifier = base58.b58encode(binary_identifier).decode('utf-8')
-                result[identifier] = data
-            except Exception:
-                # 静默处理错误，提高性能
-                continue
-        
-        end_time = time.time()
-        self._update_performance_stats(start_time, end_time, len(data_list), is_gpu=False)
-        return result
+                # 输出进度
+                chunk_time = time.time() - chunk_start
+                chunk_rate = chunk_size_actual / chunk_time if chunk_time > 0 else 0
+                print(f"区块 {i//chunk_size + 1} 处理完成 ({len(local_result)}/{chunk_size_actual}), 速率: {chunk_rate:.2f}项/秒", flush=True)
+                print(f"总进度: {total_processed}/{batch_size} ({total_processed/batch_size*100:.1f}%)", flush=True)
+            
+            end_time = time.time()
+            elapsed = end_time - start_time
+            processing_speed = batch_size / elapsed if elapsed > 0 else 0
+            
+            # 输出处理结果
+            print(f"CPU处理完成: 成功处理 {len(result)}/{batch_size} 条数据", flush=True)
+            print(f"总耗时: {elapsed:.2f}秒，平均速率: {processing_speed:.2f}项/秒", flush=True)
+            
+            # 更新性能统计
+            self._update_performance_stats(start_time, end_time, batch_size, is_gpu=False)
+            
+            return result
+            
+        except Exception as e:
+            print(f"CPU处理错误: {type(e).__name__}", flush=True)
+            if hasattr(e, "__str__"):
+                print(f"错误详情: {str(e)[:100]}", flush=True)
+            
+            end_time = time.time()
+            self._update_performance_stats(start_time, end_time, batch_size, is_gpu=False)
+            
+            # 出错时返回空结果
+            return {}
     
     def _batch_check_identifiers(self, identifier_to_data: Dict[str, bytes]) -> List[Tuple[str, bytes]]:
         """检查一批标识符是否在目标集中"""
